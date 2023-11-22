@@ -12,5 +12,5 @@ for the successful implementation of straightforward multiprocess/multithreaded 
 Functions: Develop proficiency in utilizing system functions to create applications that employ standard input/output 
 channels and access files.
 
-
+# Summary
 This repository aims to facilitate an exploration of the core concepts behind modern operating systems, fostering the skills necessary for the development of efficient, multiprocess/multithreaded applications that interact seamlessly with standard input/output channels and file systems.
