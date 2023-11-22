@@ -1,5 +1,3 @@
-# Operating-System-C-
-
 # Repository Description:
 
 This repository serves as a comprehensive preparation for academic sessions, encompassing a range of tasks and activities. A substantial portion of the implemented programs draws inspiration from the materials provided by our instructors, forming a practical foundation for the subject matter.
