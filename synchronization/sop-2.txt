@@ -1,0 +1,252 @@
+#include <asm-generic/errno-base.h>
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#include <asm-generic/errno.h>
+#include <math.h>
+
+
+#include <errno.h>
+#include <mqueue.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#define MSG_MAX 10
+#define MSG_SIZE 1024
+
+#define ERR(source) \
+    (fprintf(stderr, "%s:%d\n", __FILE__, __LINE__), perror(source), kill(0, SIGKILL), exit(EXIT_FAILURE))
+
+typedef struct msg
+{
+    int a,b,c,d;
+} msg;
+
+typedef struct driver_msg
+{
+    mqd_t* mq;
+    pid_t pid;
+} driver_msg;
+
+void usage(const char* name)
+{
+    fprintf(stderr, "USAGE: %s N T\n", name);
+    fprintf(stderr, "N: 1 <= N - number of drivers\n");
+    fprintf(stderr, "T: 5 <= T - simulation duration\n");
+    exit(EXIT_FAILURE);
+}
+
+void thread_routine(union sigval sv) {
+    driver_msg *dmsg = (driver_msg *) sv.sival_ptr;
+    printf("pid: %d\n", dmsg->pid);
+    
+    // Restore notification
+    struct sigevent not;
+    memset(&not, 0, sizeof(not));
+    not.sigev_notify = SIGEV_THREAD;
+    not.sigev_notify_function = thread_routine;
+    not.sigev_notify_attributes = NULL; // Thread creation attributes
+    not.sigev_value.sival_ptr = dmsg; // Thread routine argument
+    if (mq_notify(*(dmsg->mq), &not) < 0) {
+      perror("mq_notify()");
+      exit(1);
+    }
+
+    char buf[MSG_SIZE];
+    unsigned int prio;
+
+    mq_receive(*dmsg->mq, buf, sizeof(buf), &prio);
+    int dist=*((int*)buf);
+    printf("PARENT: The driver %d drove a distance of %d.\n", dmsg->pid, dist);
+
+
+}
+
+
+void child_work(mqd_t* mq)
+{
+    char mq_name[50];
+    sprintf(mq_name, "/uber_results_%d", getpid());
+
+    struct mq_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.mq_msgsize = MSG_SIZE;
+    attr.mq_maxmsg = MSG_MAX;
+    mqd_t mq2 = mq_open(mq_name, O_CREAT  | O_RDWR | O_NONBLOCK, 0600, &attr);
+    if (mq2 < 0) 
+        ERR("mq_open");
+
+    srand(getpid());
+    int x=rand()%2001-1000;
+    int y=rand()%2001-1000;
+
+    printf("[ %d ]: Position(%d, %d)\n", getpid(), x,y);
+
+    while(1)
+    {
+        char buf[MSG_SIZE];
+        unsigned int prio;
+        if(TEMP_FAILURE_RETRY(mq_receive(*mq, buf, sizeof(buf), &prio))<1)
+        {
+            if(errno==EAGAIN)
+                continue;
+            if(errno!=EAGAIN)
+                ERR("mq_recive");
+        }
+        msg mm=*((msg*)buf);  
+        int a, b, c, d;
+        a=mm.a;
+        b=mm.b;
+        c=mm.c;
+        d=mm.d;
+        //sscanf(buf, "%d %d %d %d", &a, &b, &c, &d);
+        
+        printf("[ %d ]: Taking task: (%d, %d) -> (%d, %d) \n", getpid(), a,b,c,d);
+
+
+        // wait
+        int milsec=sqrt((x-a)*(x-a)+(y-b)*(y-b))+sqrt((c-a)*(c-a)+(d-b)*(d-b));;
+
+        struct timespec time_wait;
+        time_wait.tv_sec = milsec / 1000;         
+        time_wait.tv_nsec = (milsec % 1000) * 1e6; 
+        nanosleep(&time_wait, NULL);
+        
+        *((int*)buf)=milsec;
+        if (TEMP_FAILURE_RETRY(mq_send(mq2, buf, MSG_SIZE,0)))
+            ERR("mq_send");
+
+        //set new cordinates
+        x=c;
+        y=d;
+    }
+}
+void parent_work(mqd_t* mq, pid_t* pids, int N)
+{
+    // opening queues
+    mqd_t* mqs=malloc(sizeof(mqd_t)*N);
+    for(int i=0; i<N; i++)
+    {
+        char mq_name[50];
+        sprintf(mq_name, "/uber_results_%d", pids[i]);
+
+        struct mq_attr attr;
+        memset(&attr, 0, sizeof(attr));
+        attr.mq_msgsize = MSG_SIZE;
+        attr.mq_maxmsg = MSG_MAX;
+        mqs[i] = mq_open(mq_name, O_CREAT  | O_RDWR | O_NONBLOCK, 0600, &attr);
+        if (mqs[i] < 0) {
+            ERR("mq_open");
+        }
+
+        driver_msg* dmsg=malloc(sizeof(driver_msg));
+        dmsg->mq=&mqs[i];
+        dmsg->pid=pids[i];
+        struct sigevent not;
+        memset(&not, 0, sizeof(not));
+        not.sigev_notify = SIGEV_THREAD;
+        not.sigev_notify_function = thread_routine;
+        not.sigev_notify_attributes = NULL; // Thread creation attributes
+        not.sigev_value.sival_ptr = dmsg; // Thread routine argument
+        if (mq_notify(mqs[i], &not) < 0) {
+            ERR("mq_notify");
+        }
+
+
+    }
+
+    srand(getpid());
+
+    while(1)
+    {
+        // sending task
+        char buff[MSG_SIZE];
+        int a=rand()%2001-1000;
+        int b=rand()%2001-1000;
+        int c=rand()%2001-1000;
+        int d=rand()%2001-1000;
+
+        msg mm;
+        mm.a=a;
+        mm.b=b;
+        mm.c=c;
+        mm.d=d;
+        *((msg*)buff) = mm;
+        //snprintf(buff, sizeof(buff), "%d %d %d %d", a,b,c,d);
+        printf("Sending task (%d, %d) -> (%d, %d)\n",a,b,c,d);
+        if (TEMP_FAILURE_RETRY(mq_send(*mq, buff, MSG_SIZE, 0)))
+        {
+            if(errno==EAGAIN)
+                fprintf(stderr, "too many msg in queue\n");
+            else
+                ERR("mq_send");
+        }
+
+        int milsec=rand()%1500+500;
+        struct timespec time_wait;
+        time_wait.tv_sec = milsec / 1000;         
+        time_wait.tv_nsec = (milsec % 1000) * 1e6; 
+        nanosleep(&time_wait, NULL); 
+    }
+
+    mq_close(*mq);
+}
+pid_t* create_children(int N, mqd_t* mq)
+{
+    pid_t* pids= malloc(sizeof(pid_t)*N);
+    if(pids==NULL)
+        ERR("malloc");
+
+    while(N--)
+    {
+        pid_t pid=fork();
+        switch (pid) {
+        case -1:
+            ERR("fork()");
+        case 0: {
+            free(pids);
+            child_work(mq);
+            mq_close(*mq);
+            exit(0);
+        default:
+            pids[N]=pid;
+        }
+    }
+    }
+    return pids;
+}
+int main(int argc, char** argv)
+{
+    if(argc!=3)
+        usage("usage");
+    int N = atoi(argv[1]);
+    int T = atoi(argv[2]);
+    if(N<1||T<5)
+        usage("usage");
+
+    // create queue
+    mq_unlink("/uber_tasks");
+    struct mq_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.mq_msgsize = MSG_SIZE;
+    attr.mq_maxmsg = MSG_MAX;
+    mqd_t mq = mq_open("/uber_tasks", O_CREAT | O_EXCL | O_RDWR | O_NONBLOCK, 0600, &attr);
+    if (mq < 0) {
+        perror("mq_open()");
+        return 1;
+    }
+
+
+    pid_t* pids=create_children(N, &mq);
+
+   
+    parent_work(&mq, pids, N);
+
+    
+
+    return EXIT_SUCCESS;
+}
